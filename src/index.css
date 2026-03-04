@@ -1,0 +1,78 @@
+@import url('https://fonts.googleapis.com/css2?family=Unbounded:wght@700;900&family=Figtree:wght@300;400;500;600&family=Fira+Code:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Unbounded", sans-serif;
+  --font-sans: "Figtree", sans-serif;
+  --font-mono: "Fira Code", monospace;
+
+  --color-bg: #080808;
+  --color-surface: #0f0f0f;
+  --color-elevated: #141414;
+  --color-border: #1a1a1a;
+  --color-border-hover: #2a2a2a;
+  --color-lime: #d4ff00;
+  --color-lime-glow: rgba(212, 255, 0, 0.12);
+  --color-lime-border: rgba(212, 255, 0, 0.25);
+  --color-text: #f0f0f0;
+  --color-muted: #555555;
+  --color-dim: #2a2a2a;
+  --color-green: #00e57a;
+  --color-red: #ff3d3d;
+}
+
+@layer base {
+  body {
+    @apply bg-bg text-text font-sans antialiased;
+    margin: 0;
+    padding: 0;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-display;
+  }
+
+  * {
+    @apply border-border;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-lime text-black font-bold px-6 py-3 rounded-[6px] transition-all duration-200 hover:opacity-90 active:scale-[0.98] shadow-[0_0_28px_rgba(212,255,0,0.2)];
+  }
+
+  .btn-secondary {
+    @apply bg-transparent text-text border border-border font-bold px-6 py-3 rounded-[6px] transition-all duration-200 hover:border-border-hover hover:bg-elevated active:scale-[0.98];
+  }
+
+  .card-base {
+    @apply bg-surface border border-border rounded-[6px] transition-all duration-200 hover:border-border-hover hover:bg-elevated;
+  }
+
+  .input-base {
+    @apply bg-surface border border-border rounded-[6px] px-4 py-3 text-text font-mono focus:outline-none focus:border-lime transition-all duration-200;
+  }
+
+  .label-mono {
+    @apply font-mono text-[10px] uppercase tracking-wider;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #080808;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1a1a1a;
+  border-radius: 0px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #2a2a2a;
+}
