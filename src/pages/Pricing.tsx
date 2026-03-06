@@ -110,7 +110,7 @@ export default function Pricing() {
   );
 }
 
-function FAQItem({ question, answer }: { question: string, answer: string }) {
+function FAQItem({ question, answer }: { question: string, answer: string, key?: any }) {
   const [isOpen, setIsOpen] = useState(false);
 
   return (

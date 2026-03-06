@@ -1,7 +1,7 @@
 import express from "express";
 import compression from "compression";
 import { createServer as createViteServer } from "vite";
-import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import admin from "firebase-admin";
 import Stripe from "stripe";
 import axios from "axios";
 import dotenv from "dotenv";
@@ -16,17 +16,104 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Lazy SDK Initializers
-let supabaseClient: SupabaseClient | null = null;
-function getSupabase() {
-  if (!supabaseClient) {
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const key = process.env.SUPABASE_SERVICE_KEY;
-    if (!url || !key) {
-      throw new Error("Supabase environment variables (NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_KEY) are missing.");
+let db: admin.firestore.Firestore | null = null;
+function getFirestore() {
+  if (!db) {
+    const projectId = process.env.FIREBASE_PROJECT_ID;
+    const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+    // Robust private key parsing to handle escaped newlines and potential quotes
+    let privateKey = process.env.FIREBASE_PRIVATE_KEY;
+    if (privateKey) {
+      privateKey = privateKey.replace(/\\n/g, '\n');
+      if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
+        privateKey = privateKey.substring(1, privateKey.length - 1);
+      }
     }
-    supabaseClient = createClient(url, key);
+
+    if (!projectId || !clientEmail || !privateKey) {
+      throw new Error("Firebase environment variables (FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY) are missing.");
+    }
+
+    if (!admin.apps.length) {
+      admin.initializeApp({
+        credential: admin.credential.cert({
+          projectId,
+          clientEmail,
+          privateKey,
+        }),
+      });
+    }
+    db = admin.firestore();
   }
-  return supabaseClient;
+  return db;
+}
+
+// Simple In-Memory Cache for GitHub Data
+const githubCache = new Map<string, { data: any, timestamp: number }>();
+const CACHE_TTL = 1000 * 60 * 60; // 1 hour
+
+// Temporary Cache for Generated Cards (Preview)
+const cardPreviewCache = new Map<string, { data: any, timestamp: number }>();
+const CARD_PREVIEW_TTL = 1000 * 60 * 30; // 30 minutes
+
+async function fetchWithCache(username: string) {
+  const cached = githubCache.get(username);
+  if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
+    return cached.data;
+  }
+
+  const getHeaders = (useToken: boolean) => {
+    const headers: any = {
+      'User-Agent': 'GitHub-Brain-Card-App'
+    };
+    if (useToken && process.env.GITHUB_TOKEN) {
+      const token = process.env.GITHUB_TOKEN.trim();
+      headers['Authorization'] = `token ${token}`;
+    }
+    return headers;
+  };
+
+  const performFetch = async (useToken: boolean) => {
+    const headers = getHeaders(useToken);
+    const [userRes, reposRes, eventsRes] = await Promise.all([
+      axios.get(`https://api.github.com/users/${username}`, { headers }),
+      axios.get(`https://api.github.com/users/${username}/repos?per_page=100&sort=updated`, { headers }),
+      axios.get(`https://api.github.com/users/${username}/events/public?per_page=100`, { headers }),
+    ]);
+
+    return {
+      user: userRes.data,
+      repos: reposRes.data,
+      events: eventsRes.data
+    };
+  };
+
+  try {
+    // Try with token first if available
+    const data = await performFetch(!!process.env.GITHUB_TOKEN);
+    githubCache.set(username, { data, timestamp: Date.now() });
+    return data;
+  } catch (error: any) {
+    // If 401 (Unauthorized) and we were using a token, retry without token
+    if (error.response?.status === 401 && process.env.GITHUB_TOKEN) {
+      console.warn(`GitHub Token is invalid (401). Retrying without token for ${username}...`);
+      try {
+        const data = await performFetch(false);
+        githubCache.set(username, { data, timestamp: Date.now() });
+        return data;
+      } catch (retryError: any) {
+        throw retryError;
+      }
+    }
+
+    console.error(`GitHub API Error for ${username}:`, {
+      status: error.response?.status,
+      message: error.message,
+      rateLimit: error.response?.headers?.['x-ratelimit-remaining'],
+      reset: error.response?.headers?.['x-ratelimit-reset']
+    });
+    throw error;
+  }
 }
 
 let stripeClient: Stripe | null = null;
@@ -59,23 +146,19 @@ async function startServer() {
   app.get("/api/github-data/:username", async (req, res) => {
     const { username } = req.params;
     try {
-      const [userRes, reposRes, eventsRes] = await Promise.all([
-        axios.get(`https://api.github.com/users/${username}`),
-        axios.get(`https://api.github.com/users/${username}/repos?per_page=100&sort=updated`),
-        axios.get(`https://api.github.com/users/${username}/events/public?per_page=100`),
-      ]);
-
-      res.json({
-        user: userRes.data,
-        repos: reposRes.data,
-        events: eventsRes.data
-      });
+      const data = await fetchWithCache(username);
+      res.json(data);
     } catch (error: any) {
-      console.error("GitHub fetch error:", error);
       if (error.response?.status === 404) {
         return res.status(404).json({ error: "GitHub username not found" });
       }
-      res.status(500).json({ error: "Failed to fetch GitHub data" });
+      if (error.response?.status === 401) {
+        return res.status(401).json({ error: "The provided GITHUB_TOKEN is invalid or expired. Please check your environment variables." });
+      }
+      if (error.response?.status === 403 && error.response?.headers?.['x-ratelimit-remaining'] === '0') {
+        return res.status(429).json({ error: "GitHub API rate limit exceeded. Please try again later." });
+      }
+      res.status(500).json({ error: `Failed to fetch GitHub data: ${error.message}` });
     }
   });
 
@@ -83,7 +166,6 @@ async function startServer() {
     const { username, github_data, brain_score, ai_summary, skill_scores, top_projects, stats } = req.body;
 
     try {
-      const supabase = getSupabase();
       const cardData = {
         username,
         name: github_data.name || username,
@@ -101,45 +183,46 @@ async function startServer() {
         refreshed_at: new Date().toISOString()
       };
 
-      const { data: savedCard, error: saveError } = await supabase
-        .from("cards")
-        .upsert(cardData, { onConflict: "username" })
-        .select()
-        .single();
-
-      if (saveError) throw saveError;
-      res.json(savedCard);
+      // Store in temporary preview cache instead of directly in Firestore
+      cardPreviewCache.set(username, { data: cardData, timestamp: Date.now() });
+      
+      res.json(cardData);
     } catch (error: any) {
       console.error("Save error:", error);
-      res.status(500).json({ error: error.message || "Failed to save card" });
+      res.status(500).json({ error: error.message || "Failed to cache card" });
     }
   });
 
   app.get("/api/recruiter/search", async (req, res) => {
     const { minScore, language, search } = req.query;
     try {
-      const supabase = getSupabase();
-      let query = supabase.from("cards").select("*");
+      const db = getFirestore();
+      let query: admin.firestore.Query = db.collection("cards");
 
       if (minScore) {
-        query = query.gte("brain_score", parseInt(minScore as string));
+        query = query.where("brain_score", ">=", parseInt(minScore as string));
       }
       
-      if (search) {
-        query = query.ilike("username", `%${search}%`);
-      }
+      // Firestore doesn't support ilike. For simplicity, we'll fetch and filter in memory if search is provided
+      // or just skip it for now. Let's do a simple orderBy to allow the gte query to work.
+      const snapshot = await query.orderBy("brain_score", "desc").limit(100).get();
+      let data = snapshot.docs.map(doc => doc.data());
 
-      const { data, error } = await query.order("brain_score", { ascending: false }).limit(50);
-      if (error) throw error;
+      if (search) {
+        const searchLower = (search as string).toLowerCase();
+        data = data.filter(card => 
+          card.username.toLowerCase().includes(searchLower) || 
+          (card.name && card.name.toLowerCase().includes(searchLower))
+        );
+      }
       
-      let filteredData = data;
       if (language && language !== "All") {
-        filteredData = data.filter(card => 
+        data = data.filter(card => 
           card.skill_scores.some((s: any) => s.name === language)
         );
       }
 
-      res.json(filteredData);
+      res.json(data.slice(0, 50));
     } catch (error: any) {
       console.error("Search error:", error);
       res.status(500).json({ error: "Search failed" });
@@ -148,14 +231,13 @@ async function startServer() {
 
   app.get("/api/leaderboard", async (req, res) => {
     try {
-      const supabase = getSupabase();
-      const { data, error } = await supabase
-        .from("cards")
-        .select("*")
-        .order("brain_score", { ascending: false })
-        .limit(100);
+      const db = getFirestore();
+      const snapshot = await db.collection("cards")
+        .orderBy("brain_score", "desc")
+        .limit(100)
+        .get();
 
-      if (error) throw error;
+      const data = snapshot.docs.map(doc => doc.data());
       res.json(data);
     } catch (error: any) {
       res.status(500).json({ error: error.message || "Failed to fetch leaderboard" });
@@ -165,21 +247,23 @@ async function startServer() {
   app.get("/api/card/:username", async (req, res) => {
     const { username } = req.params;
     try {
-      const supabase = getSupabase();
-      const { data, error } = await supabase
-        .from("cards")
-        .select("*")
-        .eq("username", username)
-        .single();
-
-      if (error || !data) {
-        return res.status(404).json({ error: "Card not found" });
+      // Check preview cache first
+      const cached = cardPreviewCache.get(username);
+      if (cached && (Date.now() - cached.timestamp < CARD_PREVIEW_TTL)) {
+        return res.json(cached.data);
       }
 
-      await supabase
-        .from("cards")
-        .update({ view_count: (data.view_count || 0) + 1 })
-        .eq("id", data.id);
+      const db = getFirestore();
+      const doc = await db.collection("cards").doc(username).get();
+
+      if (!doc.exists) {
+        return res.status(404).json({ error: "Card not found in preview or database" });
+      }
+
+      const data = doc.data()!;
+      await db.collection("cards").doc(username).update({
+        view_count: (data.view_count || 0) + 1
+      });
 
       res.json(data);
     } catch (error: any) {
@@ -225,11 +309,8 @@ async function startServer() {
       const session = event.data.object as Stripe.Checkout.Session;
       const username = session.metadata?.username;
       if (username) {
-        const supabase = getSupabase();
-        await supabase
-          .from("cards")
-          .update({ is_pro: true })
-          .eq("username", username);
+        const db = getFirestore();
+        await db.collection("cards").doc(username).update({ is_pro: true });
       }
     }
 
