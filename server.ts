@@ -1,6 +1,5 @@
 import express from "express";
 import compression from "compression";
-import { createServer as createViteServer } from "vite";
 import admin from "firebase-admin";
 import Stripe from "stripe";
 import axios from "axios";
@@ -130,7 +129,7 @@ function getStripe() {
   return stripeClient;
 }
 
-async function startServer() {
+export async function createServer() {
   const app = express();
   const PORT = 3000;
 
@@ -275,21 +274,29 @@ async function startServer() {
     const { username } = req.body;
     try {
       const stripe = getStripe();
+      const priceId = process.env.STRIPE_PRO_PRICE_ID;
+      const appUrl = process.env.APP_URL;
+
+      if (!priceId || !appUrl) {
+        throw new Error("Stripe configuration (STRIPE_PRO_PRICE_ID, APP_URL) is missing.");
+      }
+
       const session = await stripe.checkout.sessions.create({
         payment_method_types: ["card"],
         line_items: [
           {
-            price: process.env.STRIPE_PRO_PRICE_ID,
+            price: priceId,
             quantity: 1,
           },
         ],
         mode: "subscription",
-        success_url: `${process.env.APP_URL}/card/${username}?success=true`,
-        cancel_url: `${process.env.APP_URL}/pricing`,
+        success_url: `${appUrl}/card/${username}?success=true`,
+        cancel_url: `${appUrl}/pricing`,
         metadata: { username },
       });
       res.json({ url: session.url });
     } catch (error: any) {
+      console.error("Stripe Checkout Error:", error);
       res.status(500).json({ error: error.message || "Stripe error" });
     }
   });
@@ -319,12 +326,13 @@ async function startServer() {
 
   // Vite Middleware
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
-  } else {
+  } else if (!process.env.VERCEL) {
     const distPath = path.join(__dirname, "dist");
     app.use(express.static(distPath, {
       maxAge: '1d',
@@ -339,12 +347,18 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+  return app;
 }
 
-startServer().catch((err) => {
-  console.error("Failed to start server:", err);
-  process.exit(1);
-});
+// Only start the server if this file is run directly
+if (process.env.NODE_ENV !== "production" || !process.env.VERCEL) {
+  createServer().then((app) => {
+    const PORT = 3000;
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
+  }).catch((err) => {
+    console.error("Failed to start server:", err);
+    process.exit(1);
+  });
+}

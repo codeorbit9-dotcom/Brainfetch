@@ -57,6 +57,7 @@ export default function BrainCard({ data }: BrainCardProps) {
             <img
               src={avatar_url}
               alt={username}
+              crossOrigin="anonymous"
               className="w-full h-full object-cover grayscale hover:grayscale-0 transition-all duration-500 rounded-[2px]"
               referrerPolicy="no-referrer"
             />
@@ -193,10 +194,6 @@ export default function BrainCard({ data }: BrainCardProps) {
           >
             <Share2 className="w-3 h-3" />
             Share Link
-          </button>
-          <button className="btn-primary py-2 px-6 text-[10px] font-mono uppercase font-bold flex items-center gap-2">
-            <Download className="w-3 h-3" />
-            Export PNG
           </button>
         </div>
       </div>
