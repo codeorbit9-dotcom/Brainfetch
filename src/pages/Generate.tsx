@@ -117,7 +117,7 @@ BrainFetch Score: ${brainScore}/100
 
 Write only the 3 paragraphs. No headers. No bullet points. No preamble.`;
 
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+      const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY || "" });
       const result = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: [{ role: "user", parts: [{ text: prompt }] }],
